@@ -1,27 +1,38 @@
 
 
 from .common_types import MetadataParserError
+from . import parser_interfaces
+import sys # for error reporting - to print to sys.stderr
 
 
 class ParserError(MetadataParserError):
     """Exception class for parsing errors"""
     def __init__(self, message):
-        super().__init__(message) # Initialize the base exception class
-        self.message = message
+        msg = f'Parsing: {message}'
+        super().__init__(msg) # Initialize the base exception class
+        self.message = f'Parsing: {message}'
+
+class SyntaxError(ParserError):
+    """Exception class for parsing errors"""
+    def __init__(self, message, parser):
+        token = parser.peek()
+        msg = f"{message}; ongoing token: \"{token.value}\" at #{parser.pos} ({token.pos_line}:{token.pos_column})" if token else f"{message}; last token: <UNKNOWN>"
+        super().__init__(msg) # Initialize the base exception class
+        self.message = f'{message}'
+
+
+
+
+
+
+
 
 
 
 class Parser:
 
     TYPE_KEYWORDS = {
-        "categorical",
-        "text",
-        "info",
-        "long",
-        "double",
-        "date",
-        "loop",
-        "block",
+        cls.syntax_keyword: cls for cls in parser_interfaces.list_available_classes() if cls.syntax_keyword is not None
     }
 
 
@@ -48,20 +59,31 @@ class Parser:
         tok = self.peek()
 
         if tok is None:
-            raise ParserError("Unexpected EOF")
+            raise SyntaxError("Unexpected EOF",self)
 
         if expected and tok.value != expected:
-            raise ParserError(f"Expected \"{expected}\", got \"{tok.value}\" at position #{tok.pos} ({tok.pos_line}:{tok.pos_column})")
+            raise SyntaxError(f"Expected \"{expected}\", got \"{tok.value}\"",self)
 
         self.pos += 1
         return tok
 
 
     def match(self, value):
-
         tok = self.peek()
-
         return tok and tok.value == value
+
+    def imatch(self, value):
+        """Same, case-insensitive"""
+        tok = self.peek()
+        return tok and tok.value.lower() == value.lower()
+
+    def read_while(self, condition):
+
+        result = []
+        while self.peek() and condition(self.peek()):
+            result.append(self.consume())
+
+        return result
 
 
     # =============================
@@ -73,7 +95,7 @@ class Parser:
         variables = []
 
         while self.peek() is not None:
-            variables.append(self.parse_variable())
+            variables.append(self.parse_node())
 
         return variables
 
@@ -82,17 +104,22 @@ class Parser:
     # Labels
     # =============================
 
-    def parse_label(self):
+    def parse_label(self, optional=False):
 
-        tok = self.consume()
+        tok = self.peek()
 
         if tok.value == "-":
+            tok = self.consume()
             return None
 
         if tok.type == "STRING":
+            tok = self.consume()
             return tok.value
 
-        raise ParserError("Expected label string or '-'")
+        if optional:
+            return None
+        else:
+            raise SyntaxError("Expected label string or '-'",self)
 
 
 
@@ -171,7 +198,7 @@ class Parser:
     # Modifiers
     # =============================
 
-    def parse_modifiers(self):
+    def parse_modifiers(self, place_or_node_type):
 
         mods = []
 
@@ -179,36 +206,27 @@ class Parser:
 
             tok = self.peek()
 
-            if not tok or tok.type != "IDENT":
+            if not tok or tok.type not in ["IDENT","KEYWORD"]:
                 break
+            
+            ALLOWED_MODIFIER_KEYWORDS = parser_interfaces.get_allowed_modifiers(place_or_node_type)
 
-            name = self.consume().value
+            candidates = set([
+                c.lower() for c in ALLOWED_MODIFIER_KEYWORDS
+            ])
+            name = None
+            for mod in candidates:
+                if self.imatch(mod):
+                    name = self.consume().value.lower()
+                    break
+            if name is None:
+                break
+            
+            cls = parser_interfaces.get_modifier_class(name)
+            mod = cls(name)
+            mod.parse(self)
 
-            args = []
-
-            if self.match("("):
-
-                self.consume("(")
-
-                depth = 1
-
-                while depth > 0:
-
-                    tok = self.consume()
-
-                    if tok.value == "(":
-                        depth += 1
-
-                    elif tok.value == ")":
-                        depth -= 1
-
-                        if depth == 0:
-                            break
-
-                    args.append(tok.value)
-
-
-            mods.append(Modifier(name, args))
+            mods.append(mod)
 
 
         return mods
@@ -237,8 +255,12 @@ class Parser:
             self.consume(",")
 
         self.consume("}")
+        modifiers = self.parse_modifiers('category_list')
 
-        return elements
+        el = parser_interfaces.ElementsCollection()
+        el.elements = elements
+        el.modifiers = modifiers
+        return el
 
 
 
@@ -250,47 +272,91 @@ class Parser:
 
         name = self.consume().value
 
-        el = IterationElement(name)
+        if name.lower() == 'use':
+            name = None
+            label = None
+            properties = None
+            el = parser_interfaces.IterationElement(name)
+            el.name = name
+            el.label = label
+            el.properties = properties
+            el.parse_sl_reference(self)
+            print(f"parsing category: {el}") # TODO: debug
+            return
+        elif self.peek().value.lower() == 'use':
+            self.consume('use')
+            label = None
+            properties = None
+            el = parser_interfaces.IterationElement(name)
+            el.name = name
+            el.label = label
+            el.properties = properties
+            el.parse_sl_reference(self)
+            print(f"parsing category: {el}") # TODO: debug
+            return
 
-        el.label = self.parse_label()
+        label = self.parse_label(optional=True)
 
-
+        properties = None
         if self.match("["):
-            el.properties = self.parse_properties()
+            properties = self.parse_properties()
+
+        el = parser_interfaces.IterationElement(name)
+        el.label = label
+        el.properties = properties
+
+        el.parse(self)
+        print(f"parsing category: {el}") # TODO: debug
+
+        return el
 
 
-        if self.match("{"):
-            el.children = self.parse_iteration_block()
+    # =============================
+    # Page elements
+    # =============================
 
+    def parse_page_element(self):
 
-        el.modifiers = self.parse_modifiers()
+        name = self.consume().value
 
+        label = self.parse_label(optional=True)
+
+        properties = None
+        if self.match("["):
+            properties = self.parse_properties()
+
+        el = parser_interfaces.PageElement(name)
+        el.label = label
+        el.properties = properties
+
+        el.parse(self)
+        print(f"parsing page element: {el}") # TODO: debug
 
         return el
 
 
 
-    # =============================
-    # Fields section
-    # =============================
+    # # =============================
+    # # Fields section
+    # # =============================
 
-    def parse_fields(self):
+    # def parse_fields(self):
 
-        fields = []
+    #     fields = []
 
-        self.consume("fields")
+    #     self.consume("fields")
 
-        self.consume("(")
+    #     self.consume("(")
 
-        while not self.match(")"):
+    #     while not self.match(")"):
 
-            fields.append(
-                self.parse_variable()
-            )
+    #         fields.append(
+    #             self.parse_node()
+    #         )
 
-        self.consume(")")
+    #     self.consume(")")
 
-        return fields
+    #     return fields
 
 
 
@@ -298,45 +364,64 @@ class Parser:
     # Variables
     # =============================
 
-    def parse_variable(self):
+    def parse_node(self):
+        
+        token = self.consume()
 
-        name = self.consume().value
+        if token.type != "IDENT":
+            raise SyntaxError(f"Expected identifier, got {token.type} (\"{token.value}\")",self)
+        name = token.value
 
-        var = Variable(name)
+        try:
+
+            label = self.parse_label()
+
+            properties = {}
+            if self.match("["):
+                properties = self.parse_properties()
+
+            pre_modifiers = self.parse_modifiers('node_pre') or []
+
+            if self.match(";") and name.strip().lower() == 'HDATA'.lower():
+                cls = self.TYPE_KEYWORDS[":root"]
+
+                var = cls(name)
+                var.label = label
+                var.properties = properties
+                var.pre_modifiers = pre_modifiers
+
+                var.parse(self)
+
+                self.consume(";")
+
+                print(f"parsing item: {var}") # TODO: debug
+
+                return var
+            
+            type_tok = self.consume()
+
+            if type_tok.value not in self.TYPE_KEYWORDS:
+                raise SyntaxError(f"Error parsing {name}: Node type not known '{type_tok.value}'",self)
+
+            var_type_keyword = type_tok.value
+            cls = self.TYPE_KEYWORDS[var_type_keyword]
+
+            var = cls(name)
+            var.label = label
+            var.properties = properties
+            var.pre_modifiers = pre_modifiers
+
+            var.parse(self)
+
+            self.consume(";")
+
+            print(f"parsing item: {var}") # TODO: debug
+
+            return var
+        
+        except Exception as e:
+            msg_err_failed_at = f"{SyntaxError(f'Failed when parsing {name}: {e}',self)}"
+            print(msg_err_failed_at,file=sys.stderr)
+            raise e
 
 
-        var.label = self.parse_label()
-
-
-        if self.match("["):
-            var.properties = self.parse_properties()
-
-
-        type_tok = self.consume()
-
-        if type_tok.value not in self.TYPE_KEYWORDS:
-            raise ParserError(
-                f"Invalid type '{type_tok.value}'"
-            )
-
-        var.var_type = type_tok.value
-
-
-        if self.match("["):
-            var.range = self.parse_range()
-
-
-        if self.match("{"):
-            var.iterations = self.parse_iteration_block()
-
-
-        if self.match("fields"):
-            var.fields = self.parse_fields()
-
-
-        var.modifiers = self.parse_modifiers()
-
-
-        self.consume(";")
-
-        return var

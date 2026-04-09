@@ -199,9 +199,55 @@ class Tokenizer:
 
     def read_number(self):
 
-        return self.read_while(
-            lambda c: c.isdigit() or c == "."
-        )
+        # # very simplistic and will indeed fail on several common...
+        # return self.read_while(
+        #     lambda c: c.isdigit() or c == "."
+        # )
+
+        start_pos = self.pos
+        s = self.text
+        i = self.pos
+
+        # optional leading sign
+        if i<len(s) and s[i] in "+-":
+            i += 1
+        
+        has_digit = False
+        has_dot = False
+
+        while i < len(s):
+            c = s[i]
+            if c.isdigit():
+                has_digit = True
+                i += 1
+            elif c == "." and not has_dot:
+                has_dot = True
+                i += 1
+            else:
+                break
+        if not has_digit:
+            raise TokenizerError("Failed to parse a number")
+        number_str = s[start_pos:i]
+        if len(number_str) == 0:
+            raise TokenizerError("Failed to parse a number")
+        if number_str[-1] == ".":
+            i -= 1
+            number_str = s[start_pos:i]
+        
+        # optional handle exponent
+        if i < len(s) and s[i] in "eE":
+            i += 1
+            if i < len(s) and s[i] in "+=": # exponent sign
+                i += 1
+            exp_digits_start = i
+            while i < len(s) and s[i].isdigit():
+                i += 1
+            if i == exp_digits_start:
+                raise TokenizerError("Invalid number, exponent missing digits")
+            
+        number_str = s[start_pos:i]
+        self.pos = i
+        return number_str
 
 
     def read_trivia(self):
@@ -250,6 +296,11 @@ class Tokenizer:
 
         if ch.isdigit():
             return ("NUMBER", self.read_number(), pos_tuple)
+        if ch in ".+-":
+            try:
+                return ("NUMBER", self.read_number(), pos_tuple)
+            except TokenizerError:
+                pass
 
 
         if ch.isalpha() or ch == "_":
