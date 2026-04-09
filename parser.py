@@ -216,7 +216,7 @@ class Parser:
 
 
     # =============================
-    # Iteration blocks
+    # Iteration blocks/elements collection/categories
     # =============================
 
     def parse_iteration_block(self):

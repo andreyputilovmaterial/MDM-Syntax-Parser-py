@@ -6,8 +6,8 @@ from .common_types import MetadataParserError
 class TokenizerError(MetadataParserError):
     """Exception class for parsing errors"""
     def __init__(self, message):
-        super().__init__(message) # Initialize the base exception class
-        self.message = message
+        super().__init__(f'Tokenizer: {message}') # Initialize the base exception class
+        self.message = f'Tokenizer: {message}'
 
 
 
@@ -54,7 +54,7 @@ class Token:
 
 class Tokenizer:
 
-    SYMBOLS = "{}[](),;=-"
+    SYMBOLS = "{}[](),;=-/\\^.#"
 
     KEYWORDS = {
         "categorical",
@@ -83,12 +83,16 @@ class Tokenizer:
         self.pos_column = 1
 
 
-    def peek(self):
+    def peek(self, n=1):
+        """Look ahead of n chars without consuming them"""
 
         if self.pos >= self.len:
             return None
 
-        return self.text[self.pos]
+        if self.pos + n > len(self.text):
+            return self.text[self.pos:]
+        else:
+            return self.text[self.pos:self.pos+n]
 
 
     def advance(self, n=1):
@@ -120,6 +124,12 @@ class Tokenizer:
     def read_whitespace(self):
 
         return self.read_while(str.isspace)
+    
+    def read_comment(self):
+        if self.peek(2) == "'!":
+            return self.read_multiline_comment()
+        else:
+            return self.read_single_line_comment()
 
 
     def read_single_line_comment(self):
@@ -143,7 +153,7 @@ class Tokenizer:
             if self.peek() is None:
                 raise TokenizerError("Unclosed multiline comment")
 
-            if self.peek() == "!":
+            if self.peek(2) == "!'":
                 self.advance()
                 break
 
@@ -211,14 +221,7 @@ class Tokenizer:
 
             if self.peek() == "'":
 
-                comment = self.read_single_line_comment()
-
-                comments.append(comment)
-                continue
-
-            if self.peek() == "!":
-
-                comment = self.read_multiline_comment()
+                comment = self.read_comment()
 
                 comments.append(comment)
                 continue
